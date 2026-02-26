@@ -1,122 +1,220 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { API_BASE_URL, getJson, postForm, postJson } from "./api";
-import type { Account, Job, OperationCatalogEntry } from "./types";
+import type {
+  Account,
+  ActionPreviewResult,
+  CommitResponse,
+  ExplorerAlbum,
+  ExplorerItem,
+  ExplorerItemsResponse,
+  ExplorerSource,
+  Job,
+  JobStreamEvent,
+  OperationCatalogEntry,
+} from "./types";
 
-const initialJobParams = JSON.stringify(
-  {
-    target: ".",
-    recursive: false,
-  },
-  null,
-  2
-);
+type PreviewDialog = {
+  title: string;
+  previewId: string;
+  matchCount: number;
+  warnings: string[];
+  sampleItems: string[];
+  commitPath: string;
+};
+
+const defaultActionDate = new Date().toISOString().slice(0, 16);
+
+function timestampLabel(timestamp: number | null): string {
+  if (!timestamp) return "-";
+  return new Date(timestamp * 1000).toLocaleString();
+}
+
+function bytesLabel(size: number | null): string {
+  if (!size || size <= 0) return "-";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
 
 export function App() {
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [sources, setSources] = useState<ExplorerSource[]>([]);
+  const [albums, setAlbums] = useState<ExplorerAlbum[]>([]);
+  const [items, setItems] = useState<ExplorerItem[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [catalog, setCatalog] = useState<OperationCatalogEntry[]>([]);
+  const [operations, setOperations] = useState<OperationCatalogEntry[]>([]);
+
+  const [activeAccountId, setActiveAccountId] = useState("");
+  const [activeSource, setActiveSource] = useState("library");
+  const [activeAlbumId, setActiveAlbumId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [filterFavorite, setFilterFavorite] = useState<boolean | null>(null);
+  const [filterArchived, setFilterArchived] = useState<boolean | null>(null);
+  const [pageCursor, setPageCursor] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [selectedDateTime, setSelectedDateTime] = useState(defaultActionDate);
+
+  const [previewDialog, setPreviewDialog] = useState<PreviewDialog | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
 
-  const [accountLabel, setAccountLabel] = useState("");
-  const [emailHint, setEmailHint] = useState("");
+  const [showSetup, setShowSetup] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showPipeline, setShowPipeline] = useState(false);
+  const [showUpload, setShowUpload] = useState(false);
 
-  const [authAccountId, setAuthAccountId] = useState("");
-  const [authData, setAuthData] = useState("");
-
-  const [cookieAccountId, setCookieAccountId] = useState("");
+  const [newAccountLabel, setNewAccountLabel] = useState("");
+  const [newAccountEmail, setNewAccountEmail] = useState("");
+  const [gpmcAuthData, setGpmcAuthData] = useState("");
+  const [cookieText, setCookieText] = useState("");
   const [cookieFile, setCookieFile] = useState<File | null>(null);
 
-  const [jobAccountId, setJobAccountId] = useState("");
-  const [provider, setProvider] = useState<"gptk" | "gpmc" | "gp_disguise">("gpmc");
-  const [operation, setOperation] = useState("gpmc.upload");
-  const [paramsText, setParamsText] = useState(initialJobParams);
-  const [dryRun, setDryRun] = useState(true);
+  const [uploadTarget, setUploadTarget] = useState(".");
+  const [uploadAlbumName, setUploadAlbumName] = useState("");
+  const [uploadRecursive, setUploadRecursive] = useState(false);
 
-  const runningCount = useMemo(() => jobs.filter((job) => job.status === "running").length, [jobs]);
-  const queuedCount = useMemo(() => jobs.filter((job) => job.status === "queued").length, [jobs]);
+  const [advancedProvider, setAdvancedProvider] = useState<"gptk" | "gpmc" | "gp_disguise">("gptk");
+  const [advancedOperation, setAdvancedOperation] = useState("");
+  const [advancedParamsText, setAdvancedParamsText] = useState("{}");
 
-  const filteredCatalog = useMemo(() => catalog.filter((entry) => entry.provider === provider), [catalog, provider]);
-  const selectedCatalog = useMemo(
-    () => catalog.find((entry) => entry.operation === operation) ?? null,
-    [catalog, operation]
+  const [pipelineInputText, setPipelineInputText] = useState("");
+  const [pipelineDisguiseType, setPipelineDisguiseType] = useState<"image" | "video">("image");
+  const [pipelineSeparator, setPipelineSeparator] = useState("FILE_DATA_BEGIN");
+  const [pipelineKeepArtifacts, setPipelineKeepArtifacts] = useState(false);
+  const [pipelineOutputDir, setPipelineOutputDir] = useState("");
+  const [pipelineAlbumName, setPipelineAlbumName] = useState("");
+
+  const activeAccount = useMemo(() => accounts.find((item) => item.id === activeAccountId) ?? null, [accounts, activeAccountId]);
+  const selectedCount = selectedKeys.size;
+  const activeJobs = useMemo(() => jobs.filter((item) => item.status === "running" || item.status === "queued").length, [jobs]);
+
+  const providerOperations = useMemo(
+    () => operations.filter((item) => item.provider === advancedProvider),
+    [operations, advancedProvider]
   );
 
-  async function refreshAll() {
-    try {
-      const [nextAccounts, nextJobs, nextCatalog] = await Promise.all([
-        getJson<Account[]>("/api/accounts"),
-        getJson<Job[]>("/api/jobs?limit=200"),
-        getJson<OperationCatalogEntry[]>("/api/operations/catalog"),
-      ]);
-      setAccounts(nextAccounts);
-      setJobs(nextJobs);
-      setCatalog(nextCatalog);
+  function buildItemQuery(cursor?: string | null): string {
+    const params = new URLSearchParams();
+    params.set("account_id", activeAccountId);
+    params.set("page_size", "160");
+    if (cursor) params.set("page_cursor", cursor);
+    if (activeSource !== "albums") {
+      params.set("source", activeSource);
+    }
+    if (activeAlbumId) params.set("album_id", activeAlbumId);
+    if (search.trim()) params.set("search", search.trim());
+    if (filterFavorite !== null) params.set("favorite", String(filterFavorite));
+    if (filterArchived !== null) params.set("archived", String(filterArchived));
+    return `/api/v2/explorer/items?${params.toString()}`;
+  }
 
-      if (!authAccountId && nextAccounts[0]) {
-        setAuthAccountId(nextAccounts[0].id);
-        setCookieAccountId(nextAccounts[0].id);
-        setJobAccountId(nextAccounts[0].id);
-      }
+  async function loadBootstrap() {
+    try {
+      const [accountRows, sourceRows, opRows, jobRows] = await Promise.all([
+        getJson<Account[]>("/api/v2/accounts"),
+        getJson<ExplorerSource[]>("/api/v2/explorer/sources"),
+        getJson<OperationCatalogEntry[]>("/api/v2/advanced/operations"),
+        getJson<Job[]>("/api/v2/jobs?limit=120"),
+      ]);
+      setAccounts(accountRows);
+      setSources(sourceRows);
+      setOperations(opRows);
+      setJobs(jobRows);
+      if (!activeAccountId && accountRows[0]) setActiveAccountId(accountRows[0].id);
     } catch (err) {
       setError((err as Error).message);
     }
   }
 
+  async function loadAlbums() {
+    if (!activeAccountId) return;
+    const rows = await getJson<ExplorerAlbum[]>(`/api/v2/explorer/albums?account_id=${activeAccountId}`);
+    setAlbums(rows);
+  }
+
+  async function loadItems(reset = true) {
+    if (!activeAccountId) return;
+    const cursor = reset ? null : nextCursor;
+    if (!reset && !cursor) return;
+    const rows = await getJson<ExplorerItemsResponse>(buildItemQuery(cursor));
+    setItems((prev) => (reset ? rows.items : [...prev, ...rows.items]));
+    setPageCursor(cursor);
+    setNextCursor(rows.next_cursor);
+    if (reset) setSelectedKeys(new Set());
+  }
+
+  async function loadJobs() {
+    const rows = await getJson<Job[]>("/api/v2/jobs?limit=200");
+    setJobs(rows);
+  }
+
   useEffect(() => {
-    void refreshAll();
+    void loadBootstrap();
     const timer = window.setInterval(() => {
-      void refreshAll();
-    }, 2500);
+      void loadJobs().catch(() => undefined);
+    }, 5000);
     return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
-    if (!filteredCatalog.length) {
-      return;
+    if (!providerOperations.length) return;
+    if (!providerOperations.find((item) => item.operation === advancedOperation)) {
+      const next = providerOperations[0];
+      setAdvancedOperation(next.operation);
+      setAdvancedParamsText(JSON.stringify(next.params_template, null, 2));
     }
-    const operationExists = filteredCatalog.some((entry) => entry.operation === operation);
-    if (!operationExists) {
-      setOperation(filteredCatalog[0].operation);
-      setParamsText(JSON.stringify(filteredCatalog[0].params_template, null, 2));
-    }
-  }, [provider, filteredCatalog, operation]);
+  }, [providerOperations, advancedOperation]);
 
   useEffect(() => {
-    const stream = new EventSource(`${API_BASE_URL}/api/jobs/stream`);
+    if (!activeAccountId) return;
+    setError(null);
+    void loadAlbums().catch((err) => setError((err as Error).message));
+    void loadItems(true).catch((err) => setError((err as Error).message));
+  }, [activeAccountId, activeSource, activeAlbumId, search, filterFavorite, filterArchived]);
+
+  useEffect(() => {
+    const stream = new EventSource(`${API_BASE_URL}/api/v2/jobs/stream`);
     stream.onmessage = (event) => {
       try {
-        const incoming = JSON.parse(event.data) as Job;
+        const payload = JSON.parse(event.data) as JobStreamEvent;
+        const incoming = payload.payload.job;
         setJobs((prev) => {
-          const found = prev.find((item) => item.id === incoming.id);
-          if (!found) {
-            return [incoming, ...prev];
-          }
-          return prev.map((item) => (item.id === incoming.id ? incoming : item));
+          const idx = prev.findIndex((item) => item.id === incoming.id);
+          if (idx === -1) return [incoming, ...prev];
+          const next = [...prev];
+          next[idx] = incoming;
+          return next;
         });
       } catch {
-        // ignore parse errors
+        // ignore malformed event
       }
     };
-    stream.onerror = () => {
-      stream.close();
-    };
+    stream.onerror = () => stream.close();
     return () => stream.close();
   }, []);
 
-  async function handleCreateAccount(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
+  function resetStatus() {
     setError(null);
+    setMessage(null);
+  }
+
+  async function refreshIndex() {
+    if (!activeAccountId) return;
+    resetStatus();
+    setBusy(true);
     try {
-      await postJson<Account>("/api/accounts", {
-        label: accountLabel,
-        email_hint: emailHint || null,
+      await postJson("/api/v2/explorer/index/refresh", {
+        account_id: activeAccountId,
+        max_items: 5000,
+        include_album_members: true,
+        force_full: false,
       });
-      setAccountLabel("");
-      setEmailHint("");
-      await refreshAll();
+      setMessage("Explorer index refresh queued.");
+      await loadJobs();
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -124,17 +222,21 @@ export function App() {
     }
   }
 
-  async function handleSetGpmcAuth(event: FormEvent) {
+  async function createAccount(event: FormEvent) {
     event.preventDefault();
-    if (!authAccountId || !authData) return;
+    if (!newAccountLabel.trim()) return;
+    resetStatus();
     setBusy(true);
-    setError(null);
     try {
-      await postJson<Account>(`/api/accounts/${authAccountId}/gpmc-auth`, {
-        auth_data: authData,
+      const created = await postJson<Account>("/api/v2/accounts", {
+        label: newAccountLabel.trim(),
+        email_hint: newAccountEmail.trim() || null,
       });
-      setAuthData("");
-      await refreshAll();
+      setNewAccountLabel("");
+      setNewAccountEmail("");
+      await loadBootstrap();
+      setActiveAccountId(created.id);
+      setMessage("Account created.");
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -142,17 +244,56 @@ export function App() {
     }
   }
 
-  async function handleImportCookies(event: FormEvent) {
+  async function saveGpmcAuth(event: FormEvent) {
     event.preventDefault();
-    if (!cookieAccountId || !cookieFile) return;
+    if (!activeAccountId || !gpmcAuthData.trim()) return;
+    resetStatus();
     setBusy(true);
-    setError(null);
+    try {
+      await postJson(`/api/v2/accounts/${activeAccountId}/credentials/gpmc`, {
+        auth_data: gpmcAuthData.trim(),
+      });
+      setGpmcAuthData("");
+      await loadBootstrap();
+      setMessage("gpmc credentials saved.");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function pasteCookies(event: FormEvent) {
+    event.preventDefault();
+    if (!activeAccountId || !cookieText.trim()) return;
+    resetStatus();
+    setBusy(true);
+    try {
+      await postJson(`/api/v2/accounts/${activeAccountId}/credentials/cookies/paste`, {
+        cookie_string: cookieText.trim(),
+      });
+      setCookieText("");
+      await loadBootstrap();
+      setMessage("Cookie string imported.");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importCookieFile(event: FormEvent) {
+    event.preventDefault();
+    if (!activeAccountId || !cookieFile) return;
+    resetStatus();
+    setBusy(true);
     try {
       const form = new FormData();
       form.set("file", cookieFile);
-      await postForm(`/api/accounts/${cookieAccountId}/gptk-cookies/import`, form);
+      await postForm(`/api/v2/accounts/${activeAccountId}/credentials/cookies/import`, form);
       setCookieFile(null);
-      await refreshAll();
+      await loadBootstrap();
+      setMessage("Cookie file imported.");
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -160,39 +301,196 @@ export function App() {
     }
   }
 
-  function loadTemplate() {
-    if (!selectedCatalog) {
-      return;
-    }
-    setParamsText(JSON.stringify(selectedCatalog.params_template, null, 2));
-  }
-
-  function addConfirmedFlag() {
-    try {
-      const parsed = JSON.parse(paramsText) as Record<string, unknown>;
-      parsed.confirmed = true;
-      setParamsText(JSON.stringify(parsed, null, 2));
-    } catch {
-      setError("Params JSON is invalid.");
-    }
-  }
-
-  async function handleCreateJob(event: FormEvent) {
-    event.preventDefault();
-    if (!jobAccountId) return;
-
+  async function refreshSession() {
+    if (!activeAccountId) return;
+    resetStatus();
     setBusy(true);
-    setError(null);
     try {
-      const parsed = JSON.parse(paramsText);
-      await postJson<Job>("/api/jobs", {
-        account_id: jobAccountId,
-        provider,
-        operation,
-        params: parsed,
-        dry_run: dryRun,
+      await postJson(`/api/v2/accounts/${activeAccountId}/session/refresh`, { source_path: "/" });
+      setMessage("Session refreshed from cookies.");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleSelected(mediaKey: string) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(mediaKey)) next.delete(mediaKey);
+      else next.add(mediaKey);
+      return next;
+    });
+  }
+
+  async function previewAction(action: string, actionParams: Record<string, unknown> = {}) {
+    if (!activeAccountId) return;
+    resetStatus();
+    setBusy(true);
+    try {
+      const payload =
+        selectedKeys.size > 0
+          ? {
+              account_id: activeAccountId,
+              selected_media_keys: Array.from(selectedKeys),
+              action,
+              action_params: actionParams,
+            }
+          : {
+              account_id: activeAccountId,
+              query: {
+                source: activeSource !== "albums" ? activeSource : undefined,
+                album_id: activeAlbumId || undefined,
+                search: search.trim() || undefined,
+                favorite: filterFavorite ?? undefined,
+                archived: filterArchived ?? undefined,
+                page_size: 500,
+              },
+              action,
+              action_params: actionParams,
+            };
+
+      const preview = await postJson<ActionPreviewResult>("/api/v2/actions/preview", payload);
+      setPreviewDialog({
+        title: `Preview action: ${action}`,
+        previewId: preview.preview_id,
+        matchCount: preview.match_count,
+        warnings: preview.warnings,
+        sampleItems: preview.sample_items.map((item) => item.file_name || item.media_key),
+        commitPath: "/api/v2/actions/commit",
       });
-      await refreshAll();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openUploadPreview(event: FormEvent) {
+    event.preventDefault();
+    if (!activeAccountId || !uploadTarget.trim()) return;
+    resetStatus();
+    setBusy(true);
+    try {
+      const preview = await postJson<{
+        preview_id: string;
+        target_count: number;
+        sample_files: string[];
+        warnings: string[];
+      }>("/api/v2/uploads/preview", {
+        account_id: activeAccountId,
+        target: uploadTarget,
+        recursive: uploadRecursive,
+        gpmc_upload_options: {
+          album_name: uploadAlbumName.trim() || undefined,
+        },
+      });
+      setPreviewDialog({
+        title: "Preview upload",
+        previewId: preview.preview_id,
+        matchCount: preview.target_count,
+        warnings: preview.warnings,
+        sampleItems: preview.sample_files,
+        commitPath: "/api/v2/uploads/commit",
+      });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openPipelinePreview(event: FormEvent) {
+    event.preventDefault();
+    if (!activeAccountId) return;
+    const inputFiles = pipelineInputText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (!inputFiles.length) return;
+    resetStatus();
+    setBusy(true);
+    try {
+      const preview = await postJson<{
+        preview_id: string;
+        input_count: number;
+        estimated_outputs: number;
+        sample_files: string[];
+        warnings: string[];
+      }>("/api/v2/pipeline/disguise-upload/preview", {
+        account_id: activeAccountId,
+        input_files: inputFiles,
+        disguise_type: pipelineDisguiseType,
+        separator: pipelineSeparator,
+        output_policy: {
+          keep_artifacts: pipelineKeepArtifacts,
+          output_dir: pipelineOutputDir.trim() || undefined,
+        },
+        gpmc_upload_options: {
+          album_name: pipelineAlbumName.trim() || undefined,
+        },
+      });
+      setPreviewDialog({
+        title: "Preview pipeline disguise -> upload",
+        previewId: preview.preview_id,
+        matchCount: preview.estimated_outputs,
+        warnings: preview.warnings,
+        sampleItems: preview.sample_files,
+        commitPath: "/api/v2/pipeline/disguise-upload/commit",
+      });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openAdvancedPreview(event: FormEvent) {
+    event.preventDefault();
+    if (!activeAccountId || !advancedOperation) return;
+    resetStatus();
+    setBusy(true);
+    try {
+      const params = JSON.parse(advancedParamsText) as Record<string, unknown>;
+      const preview = await postJson<{
+        preview_id: string;
+        operation: string;
+        warnings: string[];
+      }>("/api/v2/advanced/preview", {
+        account_id: activeAccountId,
+        provider: advancedProvider,
+        operation: advancedOperation,
+        params,
+      });
+      setPreviewDialog({
+        title: `Preview advanced: ${preview.operation}`,
+        previewId: preview.preview_id,
+        matchCount: 1,
+        warnings: preview.warnings,
+        sampleItems: [preview.operation],
+        commitPath: "/api/v2/advanced/commit",
+      });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function commitPreview() {
+    if (!previewDialog) return;
+    resetStatus();
+    setBusy(true);
+    try {
+      await postJson<CommitResponse>(previewDialog.commitPath, {
+        preview_id: previewDialog.previewId,
+        confirm: true,
+      });
+      setPreviewDialog(null);
+      setMessage("Commit queued as async job.");
+      await Promise.all([loadJobs(), loadItems(true)]);
+      setSelectedKeys(new Set());
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -201,11 +499,11 @@ export function App() {
   }
 
   async function cancelJob(jobId: string) {
+    resetStatus();
     setBusy(true);
-    setError(null);
     try {
-      await postJson(`/api/jobs/${jobId}/cancel`, {});
-      await refreshAll();
+      await postJson(`/api/v2/jobs/${jobId}/cancel`, {});
+      await loadJobs();
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -213,208 +511,372 @@ export function App() {
     }
   }
 
+  async function runAddAlbum() {
+    const raw = window.prompt("Masukkan album_id atau ketik name:NamaAlbum");
+    if (!raw) return;
+    if (raw.startsWith("name:")) {
+      await previewAction("add_album", { album_name: raw.slice(5).trim() });
+      return;
+    }
+    await previewAction("add_album", { album_id: raw.trim() });
+  }
+
+  async function runRemoveAlbum() {
+    const albumId = activeAlbumId || window.prompt("Masukkan album_id untuk remove") || "";
+    if (!albumId.trim()) return;
+    await previewAction("remove_album", { album_id: albumId.trim() });
+  }
+
+  async function runSetDateTime() {
+    const date = new Date(selectedDateTime);
+    if (Number.isNaN(date.getTime())) {
+      setError("Invalid date/time format");
+      return;
+    }
+    const timezoneSec = -date.getTimezoneOffset() * 60;
+    await previewAction("set_datetime", {
+      timestamp_sec: Math.floor(date.getTime() / 1000),
+      timezone_sec: timezoneSec,
+    });
+  }
+
   return (
-    <div className="app-shell">
+    <div className="app">
       <header className="topbar">
-        <h1>LintasMemori</h1>
-        <div className="stats">
-          <span>accounts: {accounts.length}</span>
-          <span>queued: {queuedCount}</span>
-          <span>running: {runningCount}</span>
-          <span>operations: {catalog.length}</span>
+        <div className="brand">
+          <h1>LintasMemori Dashboard</h1>
+          <p>Native Python backend for organizer + upload + disguise pipeline</p>
+        </div>
+
+        <div className="topbar-actions">
+          <label>
+            Account
+            <select value={activeAccountId} onChange={(event) => setActiveAccountId(event.target.value)}>
+              <option value="">Select account</option>
+              {accounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button onClick={() => void refreshIndex()} disabled={busy || !activeAccountId}>
+            Refresh Index
+          </button>
+          <button onClick={() => setShowSetup((prev) => !prev)} className="ghost">
+            Setup
+          </button>
+          <button onClick={() => setShowUpload((prev) => !prev)} className="ghost">
+            Upload
+          </button>
+          <button onClick={() => setShowPipeline((prev) => !prev)} className="ghost">
+            Pipeline
+          </button>
+          <button onClick={() => setShowAdvanced((prev) => !prev)} className="ghost">
+            Advanced
+          </button>
         </div>
       </header>
 
-      {error ? <div className="error-box">{error}</div> : null}
+      {error ? <div className="notice error">{error}</div> : null}
+      {message ? <div className="notice info">{message}</div> : null}
 
-      <main className="grid">
-        <section className="panel">
-          <h2>Account Setup</h2>
-          <form className="stack" onSubmit={handleCreateAccount}>
-            <label>
-              Label
-              <input
-                value={accountLabel}
-                onChange={(event) => setAccountLabel(event.target.value)}
-                placeholder="Personal Pixel"
-                required
-              />
-            </label>
-            <label>
-              Email Hint
-              <input value={emailHint} onChange={(event) => setEmailHint(event.target.value)} placeholder="optional" />
-            </label>
-            <button disabled={busy}>Create account</button>
-          </form>
-
-          <form className="stack" onSubmit={handleSetGpmcAuth}>
-            <h3>Set gpmc auth_data</h3>
-            <select value={authAccountId} onChange={(event) => setAuthAccountId(event.target.value)} required>
-              <option value="">Select account</option>
-              {accounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.label}
-                </option>
-              ))}
-            </select>
-            <textarea
-              value={authData}
-              onChange={(event) => setAuthData(event.target.value)}
-              rows={4}
-              placeholder="androidId=...&app=..."
-            />
-            <button disabled={busy}>Save auth_data</button>
-          </form>
-
-          <form className="stack" onSubmit={handleImportCookies}>
-            <h3>Import GPTK cookies</h3>
-            <select value={cookieAccountId} onChange={(event) => setCookieAccountId(event.target.value)} required>
-              <option value="">Select account</option>
-              {accounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.label}
-                </option>
-              ))}
-            </select>
-            <input type="file" accept=".txt" onChange={(event) => setCookieFile(event.target.files?.[0] ?? null)} required />
-            <button disabled={busy}>Import cookies</button>
-          </form>
-
-          <div className="account-table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>Label</th>
-                  <th>Email</th>
-                  <th>gpmc</th>
-                  <th>gptk</th>
-                </tr>
-              </thead>
-              <tbody>
-                {accounts.map((account) => (
-                  <tr key={account.id}>
-                    <td>{account.label}</td>
-                    <td>{account.email_hint || "-"}</td>
-                    <td>{account.has_gpmc_auth_data ? "yes" : "no"}</td>
-                    <td>{account.has_gptk_cookie_jar ? "yes" : "no"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section className="panel wide">
-          <h2>Job Queue</h2>
-
-          <form className="stack" onSubmit={handleCreateJob}>
-            <div className="row row-5">
-              <label>
-                Account
-                <select value={jobAccountId} onChange={(event) => setJobAccountId(event.target.value)} required>
-                  <option value="">Select account</option>
-                  {accounts.map((account) => (
-                    <option key={account.id} value={account.id}>
-                      {account.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                Provider
-                <select value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}>
-                  <option value="gpmc">gpmc</option>
-                  <option value="gptk">gptk</option>
-                  <option value="gp_disguise">gp_disguise</option>
-                </select>
-              </label>
-
-              <label>
-                Operation
-                <select value={operation} onChange={(event) => setOperation(event.target.value)}>
-                  {filteredCatalog.map((entry) => (
-                    <option key={entry.operation} value={entry.operation}>
-                      {entry.operation}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="checkbox-row">
-                <input type="checkbox" checked={dryRun} onChange={(event) => setDryRun(event.target.checked)} />
-                Dry-run
-              </label>
-
-              <div className="stack compact">
-                <button type="button" onClick={loadTemplate} disabled={busy || !selectedCatalog}>
-                  Load template
+      <div className="layout">
+        <aside className="sidebar">
+          <section className="card">
+            <h2>Sources</h2>
+            <div className="source-list">
+              {sources.map((source) => (
+                <button
+                  key={source.id}
+                  className={activeSource === source.id && !activeAlbumId ? "source active" : "source"}
+                  onClick={() => {
+                    setActiveSource(source.id);
+                    setActiveAlbumId(null);
+                  }}
+                >
+                  {source.label}
                 </button>
-                {!dryRun && selectedCatalog?.destructive ? (
-                  <button type="button" onClick={addConfirmedFlag} disabled={busy}>
-                    Add confirmed=true
-                  </button>
-                ) : null}
-              </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="card">
+            <h2>Albums</h2>
+            <div className="album-list">
+              {albums.map((album) => (
+                <button
+                  key={album.media_key}
+                  className={activeAlbumId === album.media_key ? "album active" : "album"}
+                  onClick={() => {
+                    setActiveSource("albums");
+                    setActiveAlbumId(album.media_key);
+                  }}
+                >
+                  <span>{album.title || album.media_key.slice(0, 8)}</span>
+                  <small>{album.item_count ?? 0}</small>
+                </button>
+              ))}
+            </div>
+          </section>
+        </aside>
+
+        <main className="explorer">
+          <section className="toolbar card">
+            <div className="search-row">
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search by filename/media key"
+              />
+              <button className={filterFavorite === true ? "chip active" : "chip"} onClick={() => setFilterFavorite((prev) => (prev === true ? null : true))}>
+                Favorite
+              </button>
+              <button className={filterArchived === true ? "chip active" : "chip"} onClick={() => setFilterArchived((prev) => (prev === true ? null : true))}>
+                Archived
+              </button>
+              <button onClick={() => void loadItems(true)} className="ghost">
+                Refresh
+              </button>
             </div>
 
-            {selectedCatalog ? (
-              <div className="meta-box">
-                <div>{selectedCatalog.description}</div>
-                {selectedCatalog.destructive ? <div className="warn-text">Destructive operation: run dry-run first.</div> : null}
-                {selectedCatalog.notes.map((note) => (
-                  <div key={note} className="note-text">
-                    {note}
-                  </div>
-                ))}
-              </div>
-            ) : null}
+            <div className="action-row">
+              <span>{items.length} items loaded</span>
+              <span>{selectedCount} selected</span>
+              <button onClick={() => void previewAction("trash")} disabled={busy || !activeAccountId}>
+                Trash
+              </button>
+              <button onClick={() => void previewAction("restore")} disabled={busy || !activeAccountId}>
+                Restore
+              </button>
+              <button onClick={() => void previewAction("archive")} disabled={busy || !activeAccountId}>
+                Archive
+              </button>
+              <button onClick={() => void previewAction("unarchive")} disabled={busy || !activeAccountId}>
+                Unarchive
+              </button>
+              <button onClick={() => void previewAction("favorite")} disabled={busy || !activeAccountId}>
+                Favorite
+              </button>
+              <button onClick={() => void previewAction("unfavorite")} disabled={busy || !activeAccountId}>
+                Unfavorite
+              </button>
+              <button onClick={() => void runAddAlbum()} disabled={busy || !activeAccountId}>
+                Add Album
+              </button>
+              <button onClick={() => void runRemoveAlbum()} disabled={busy || !activeAccountId}>
+                Remove Album
+              </button>
+              <input type="datetime-local" value={selectedDateTime} onChange={(event) => setSelectedDateTime(event.target.value)} />
+              <button onClick={() => void runSetDateTime()} disabled={busy || !activeAccountId}>
+                Set Date
+              </button>
+            </div>
+          </section>
 
-            <label>
-              Params JSON
-              <textarea value={paramsText} onChange={(event) => setParamsText(event.target.value)} rows={10} />
-            </label>
-            <button disabled={busy}>Submit job</button>
+          <section className="grid card">
+            {items.map((item) => (
+              <article
+                key={item.media_key}
+                className={selectedKeys.has(item.media_key) ? "media-card selected" : "media-card"}
+                onClick={() => toggleSelected(item.media_key)}
+              >
+                <div className="thumb">{item.thumb_url ? <img src={item.thumb_url} alt={item.file_name || item.media_key} /> : <span>No preview</span>}</div>
+                <div className="meta">
+                  <h3>{item.file_name || item.media_key}</h3>
+                  <p>{timestampLabel(item.timestamp_taken)}</p>
+                  <p>
+                    {item.type || "-"} · {bytesLabel(item.size)}
+                  </p>
+                  <div className="flags">
+                    {item.is_trashed ? <span>Trash</span> : null}
+                    {item.is_archived ? <span>Archived</span> : null}
+                    {item.is_favorite ? <span>Favorite</span> : null}
+                  </div>
+                </div>
+              </article>
+            ))}
+            {!items.length ? <div className="empty">No items found in current query.</div> : null}
+          </section>
+
+          <div className="footer-row">
+            <button onClick={() => void loadItems(false)} disabled={!nextCursor || busy}>
+              Load More
+            </button>
+            <span>cursor: {pageCursor || "-"}</span>
+          </div>
+        </main>
+
+        <aside className="tasks card">
+          <h2>Task Center</h2>
+          <p>
+            Active jobs: {activeJobs} · Total: {jobs.length}
+          </p>
+          <div className="jobs">
+            {jobs.map((job) => (
+              <div key={job.id} className="job">
+                <div className="job-top">
+                  <strong>{job.operation}</strong>
+                  <span>{job.status}</span>
+                </div>
+                <small>
+                  {job.provider} · {Math.round(job.progress * 100)}%
+                </small>
+                <small>{job.message || "-"}</small>
+                {(job.status === "queued" || job.status === "running") && (
+                  <button onClick={() => void cancelJob(job.id)} className="danger">
+                    Cancel
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </aside>
+      </div>
+
+      {showSetup && (
+        <section className="drawer card">
+          <h2>Account Setup</h2>
+          <p>{activeAccount ? `${activeAccount.label} selected` : "No account selected"}</p>
+
+          <form onSubmit={createAccount} className="stack">
+            <h3>Create account</h3>
+            <input value={newAccountLabel} onChange={(event) => setNewAccountLabel(event.target.value)} placeholder="Account label" required />
+            <input value={newAccountEmail} onChange={(event) => setNewAccountEmail(event.target.value)} placeholder="Email hint (optional)" />
+            <button disabled={busy}>Create</button>
           </form>
 
-          <div className="jobs-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Provider</th>
-                  <th>Operation</th>
-                  <th>Status</th>
-                  <th>Progress</th>
-                  <th>Message</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {jobs.map((job) => (
-                  <tr key={job.id}>
-                    <td className="mono">{job.id.slice(0, 8)}</td>
-                    <td>{job.provider}</td>
-                    <td className="mono">{job.operation}</td>
-                    <td>{job.status}</td>
-                    <td>{Math.round(job.progress * 100)}%</td>
-                    <td>{job.message || "-"}</td>
-                    <td>
-                      {job.status === "queued" || job.status === "running" ? (
-                        <button className="danger" onClick={() => void cancelJob(job.id)} type="button">
-                          cancel
-                        </button>
-                      ) : (
-                        <span>-</span>
-                      )}
-                    </td>
-                  </tr>
+          <form onSubmit={saveGpmcAuth} className="stack">
+            <h3>Set gpmc auth_data</h3>
+            <textarea
+              value={gpmcAuthData}
+              onChange={(event) => setGpmcAuthData(event.target.value)}
+              placeholder="androidId=...&app=..."
+              rows={3}
+              required
+            />
+            <button disabled={busy || !activeAccountId}>Save gpmc auth</button>
+          </form>
+
+          <form onSubmit={pasteCookies} className="stack">
+            <h3>Paste cookie string</h3>
+            <textarea value={cookieText} onChange={(event) => setCookieText(event.target.value)} placeholder="SAPISID=...; HSID=...;" rows={3} required />
+            <button disabled={busy || !activeAccountId}>Import cookies (paste)</button>
+          </form>
+
+          <form onSubmit={importCookieFile} className="stack">
+            <h3>Import cookie file</h3>
+            <input type="file" accept=".txt" onChange={(event) => setCookieFile(event.target.files?.[0] ?? null)} required />
+            <button disabled={busy || !activeAccountId}>Import file</button>
+          </form>
+
+          <button onClick={() => void refreshSession()} disabled={busy || !activeAccountId}>
+            Refresh GPTK session
+          </button>
+        </section>
+      )}
+
+      {showUpload && (
+        <section className="drawer card">
+          <h2>Upload Wizard</h2>
+          <form onSubmit={openUploadPreview} className="stack">
+            <input value={uploadTarget} onChange={(event) => setUploadTarget(event.target.value)} placeholder="File/folder path" required />
+            <input value={uploadAlbumName} onChange={(event) => setUploadAlbumName(event.target.value)} placeholder="Album name (optional)" />
+            <label className="toggle">
+              <input type="checkbox" checked={uploadRecursive} onChange={(event) => setUploadRecursive(event.target.checked)} />
+              Recursive scan
+            </label>
+            <button disabled={busy || !activeAccountId}>Preview upload</button>
+          </form>
+        </section>
+      )}
+
+      {showPipeline && (
+        <section className="drawer card">
+          <h2>Pipeline Wizard: disguise -&gt; upload</h2>
+          <form onSubmit={openPipelinePreview} className="stack">
+            <textarea
+              value={pipelineInputText}
+              onChange={(event) => setPipelineInputText(event.target.value)}
+              placeholder="One file/folder/pattern per line"
+              rows={4}
+              required
+            />
+            <label>
+              Disguise type
+              <select value={pipelineDisguiseType} onChange={(event) => setPipelineDisguiseType(event.target.value as "image" | "video")}>
+                <option value="image">image</option>
+                <option value="video">video</option>
+              </select>
+            </label>
+            <input value={pipelineSeparator} onChange={(event) => setPipelineSeparator(event.target.value)} placeholder="Separator" />
+            <input value={pipelineOutputDir} onChange={(event) => setPipelineOutputDir(event.target.value)} placeholder="Output dir (optional)" />
+            <input value={pipelineAlbumName} onChange={(event) => setPipelineAlbumName(event.target.value)} placeholder="Upload album (optional)" />
+            <label className="toggle">
+              <input type="checkbox" checked={pipelineKeepArtifacts} onChange={(event) => setPipelineKeepArtifacts(event.target.checked)} />
+              Keep artifacts after upload
+            </label>
+            <button disabled={busy || !activeAccountId}>Preview pipeline</button>
+          </form>
+        </section>
+      )}
+
+      {showAdvanced && (
+        <section className="drawer card">
+          <h2>Advanced Drawer</h2>
+          <form onSubmit={openAdvancedPreview} className="stack">
+            <label>
+              Provider
+              <select value={advancedProvider} onChange={(event) => setAdvancedProvider(event.target.value as "gptk" | "gpmc" | "gp_disguise")}>
+                <option value="gptk">gptk</option>
+                <option value="gpmc">gpmc</option>
+                <option value="gp_disguise">gp_disguise</option>
+              </select>
+            </label>
+
+            <label>
+              Operation
+              <select value={advancedOperation} onChange={(event) => setAdvancedOperation(event.target.value)}>
+                {providerOperations.map((item) => (
+                  <option key={item.operation} value={item.operation}>
+                    {item.operation}
+                  </option>
                 ))}
-              </tbody>
-            </table>
+              </select>
+            </label>
+
+            <textarea value={advancedParamsText} onChange={(event) => setAdvancedParamsText(event.target.value)} rows={6} />
+            <button disabled={busy || !activeAccountId}>Preview advanced operation</button>
+          </form>
+        </section>
+      )}
+
+      {previewDialog && (
+        <section className="modal">
+          <div className="modal-card card">
+            <h2>{previewDialog.title}</h2>
+            <p>Matched: {previewDialog.matchCount}</p>
+            {previewDialog.warnings.map((warning) => (
+              <p key={warning} className="warn">
+                {warning}
+              </p>
+            ))}
+            <div className="sample-list">
+              {previewDialog.sampleItems.slice(0, 10).map((item) => (
+                <div key={item}>{item}</div>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button onClick={() => void commitPreview()} disabled={busy}>
+                Confirm Commit
+              </button>
+              <button onClick={() => setPreviewDialog(null)} className="ghost" disabled={busy}>
+                Cancel
+              </button>
+            </div>
           </div>
         </section>
-      </main>
+      )}
     </div>
   );
 }

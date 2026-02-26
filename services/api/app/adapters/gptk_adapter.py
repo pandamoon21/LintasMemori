@@ -2,61 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
-
 from .common import AdapterResult, ProgressFn
 from .gptk_methods import resolve_method
-
-
-def _bootstrap_session(sidecar_base_url: str, cookie_jar: list[dict[str, Any]], source_path: str | None = None) -> dict[str, Any]:
-    response = requests.post(
-        f"{sidecar_base_url.rstrip('/')}/api/session/bootstrap",
-        json={"cookieJar": cookie_jar, "sourcePath": source_path or "/"},
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json().get("session", {})
-
-
-def _execute_rpc(
-    sidecar_base_url: str,
-    cookie_jar: list[dict[str, Any]],
-    current_session: dict[str, Any],
-    rpcid: str,
-    request_data: Any,
-    source_path: str,
-    progress: ProgressFn,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    response = requests.post(
-        f"{sidecar_base_url.rstrip('/')}/api/rpc/execute",
-        json={
-            "cookieJar": cookie_jar,
-            "session": current_session,
-            "rpcid": rpcid,
-            "requestData": request_data,
-            "sourcePath": source_path,
-        },
-        timeout=120,
-    )
-
-    if response.status_code == 401:
-        progress(0.7, "Session expired, attempting one refresh")
-        current_session = _bootstrap_session(sidecar_base_url, cookie_jar, source_path)
-        response = requests.post(
-            f"{sidecar_base_url.rstrip('/')}/api/rpc/execute",
-            json={
-                "cookieJar": cookie_jar,
-                "session": current_session,
-                "rpcid": rpcid,
-                "requestData": request_data,
-                "sourcePath": source_path,
-            },
-            timeout=120,
-        )
-
-    response.raise_for_status()
-    payload = response.json()
-    return payload, payload.get("session") or current_session
+from ..config import settings
+from ..gphotos_rpc import GPhotosRpcClient
+from ..gptk_parser import parse_response
 
 
 def run(
@@ -64,7 +14,7 @@ def run(
     params: dict[str, Any],
     cookie_jar: list[dict[str, Any]] | None,
     session_state: dict[str, Any] | None,
-    sidecar_base_url: str,
+    _sidecar_base_url: str | None,
     dry_run: bool,
     progress: ProgressFn,
 ) -> AdapterResult:
@@ -98,26 +48,32 @@ def run(
     if not cookie_jar:
         raise RuntimeError("GPTK cookie jar is missing for this account")
 
-    current_session = session_state or {}
+    client = GPhotosRpcClient(
+        cookie_jar=cookie_jar,
+        max_retries=settings.rpc_max_retries,
+        retry_base_delay_ms=settings.rpc_retry_base_delay_ms,
+    )
+
+    current_session = dict(session_state or {})
     if params.get("forceBootstrap") or not current_session.get("fSid"):
         progress(0.2, "Bootstrapping GPTK session")
-        current_session = _bootstrap_session(sidecar_base_url, cookie_jar, source_path)
+        current_session = client.bootstrap_session(source_path)
 
-    progress(0.55, "Executing GPTK RPC")
-    payload, refreshed_session = _execute_rpc(
-        sidecar_base_url=sidecar_base_url,
-        cookie_jar=cookie_jar,
-        current_session=current_session,
+    progress(0.55, f"Executing GPTK RPC {rpcid}")
+    rpc_result = client.execute_rpc(
+        session_state=current_session,
         rpcid=rpcid,
         request_data=request_data,
         source_path=source_path,
-        progress=progress,
     )
+    parsed_data = parse_response(rpcid, rpc_result.get("data"))
+
     progress(1.0, "GPTK RPC completed")
 
     return {
         "operation": resolved_operation,
         "rpcid": rpcid,
-        "data": payload.get("data"),
-        "session_state": refreshed_session,
+        "data": parsed_data,
+        "raw_data": rpc_result.get("data"),
+        "session_state": rpc_result.get("session") or current_session,
     }

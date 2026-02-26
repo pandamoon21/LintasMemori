@@ -1,0 +1,9 @@
+.git
+.runtime
+data
+**/__pycache__
+**/*.pyc
+**/.venv
+apps/web/node_modules
+apps/web/dist
+services/gptk-sidecar/node_modules

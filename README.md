@@ -1,81 +1,93 @@
 # LintasMemori
 
-Dashboard operator-first untuk mengelola Google Photos dengan integrasi:
-- Google Photos Toolkit (melalui gptk sidecar RPC)
-- google_photos_mobile_client (gpmc)
-- gp_disguise
+Dashboard organizer Google Photos dengan backend native Python.
 
-## Struktur
+## Tujuan v1
 
-- `apps/web`: React + Vite dashboard
-- `services/api`: FastAPI API (accounts, jobs, SSE)
-- `workers/python`: background worker untuk memproses job
-- `services/gptk-sidecar`: Node service untuk RPC `batchexecute`
+- Organizer explorer-style (mirip file explorer): source, albums, media grid, multi-select.
+- Core actions dengan guard **preview -> explicit confirm -> commit**.
+- Upload via `gpmc` dari dashboard.
+- Pipeline wizard `gp_disguise -> gpmc` dari dashboard.
+- Advanced drawer untuk seluruh operasi non-core.
+- Runtime produksi **tanpa Node sidecar**.
 
-## Jalankan cepat (development)
+## Stack
 
-### Opsi 1: One-click dari root (disarankan)
+- `services/api`: FastAPI + SQLite + worker job queue.
+- `apps/web`: React (build ke static assets).
+- `workers/python`: async job worker.
+- `services/gptk-sidecar`: legacy (tidak dipakai runtime v2).
 
-Windows:
+## API v2 utama
 
-- Double-click `start-all.cmd` dari folder root project.
-- Untuk stop semua service, double-click `stop-all.cmd`.
+- Accounts/Auth: `/api/v2/accounts*`
+- Explorer: `/api/v2/explorer/*`
+- Actions preview/commit: `/api/v2/actions/*`
+- Upload preview/commit: `/api/v2/uploads/*`
+- Pipeline preview/commit: `/api/v2/pipeline/*`
+- Jobs + SSE: `/api/v2/jobs*`
+- Advanced operations: `/api/v2/advanced/*`
 
-Atau via terminal:
+## Menjalankan (Native Launcher)
+
+Prasyarat:
+
+- Python 3.11+
+- npm (hanya untuk build frontend static)
+- Jika punya banyak Python, set `LM_PYTHON` ke executable Python 3.11.
+
+Start stack (1 klik):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-all.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-all.ps1
+python start_all.py
 ```
+
+Stop stack:
+
+```powershell
+python stop_all.py
+```
+
+Windows double-click:
+
+- `start-all.cmd`
+- `stop-all.cmd`
+
+Output:
+
+- API: `http://127.0.0.1:8000`
+- UI: `http://127.0.0.1:8000/app`
 
 Catatan:
-- `start-all.ps1` akan auto-prepare dependency bila belum ada.
-- Mode prepare saja (tanpa start service): `scripts/start-all.ps1 -PrepareOnly`
 
-### Opsi 2: Manual per service
+- Launcher menyimpan PID di `.runtime/processes_py.json`.
+- Log proses ada di `.runtime/logs/`.
 
-1. API
+## Menjalankan (Docker Compose)
 
-```powershell
-cd services/api
-python -m venv .venv
-. .venv/Scripts/Activate.ps1
-pip install -e .
-uvicorn app.main:app --reload --port 8000
+```bash
+docker compose up -d --build
+docker compose logs -f
+docker compose down
 ```
 
-2. Worker (terminal baru)
+URL:
 
-```powershell
-cd services/api
-. .venv/Scripts/Activate.ps1
-python ../../workers/python/worker.py
-```
+- API + UI static: `http://127.0.0.1:8000` (UI di `/app`)
 
-3. GPTK sidecar (terminal baru)
+## Alur penggunaan singkat
 
-```powershell
-cd services/gptk-sidecar
-npm install
-npm run dev
-```
+1. Buat account di Setup drawer.
+2. Set `gpmc auth_data`.
+3. Import cookies (paste/file), lalu refresh session.
+4. Jalankan **Refresh Index**.
+5. Browse explorer, pilih media, jalankan action core (preview -> confirm).
+6. Untuk upload langsung, pakai Upload wizard.
+7. Untuk disguise + upload, pakai Pipeline wizard.
+8. Pantau progres di Task Center.
 
-4. Web (terminal baru)
+## Catatan keamanan
 
-```powershell
-cd apps/web
-npm install
-npm run dev
-```
-
-Web akan memakai API default `http://localhost:8000`.
-
-## Fitur yang sudah tersedia
-
-- Multi-account management.
-- Job queue + background workers paralel lintas akun.
-- Dry-run dan guard konfirmasi untuk operasi destruktif.
-- Operation catalog (`/api/operations/catalog`) untuk preset:
-  - gpmc ops
-  - gp_disguise ops
-  - gptk ops (preset RPC method dari GPTK api.ts) + `gptk.rpc_execute` manual.
+- Sesuai asumsi v1: single-user private server-hosted.
+- Credential disimpan plain di SQLite lokal.
+- Semua aksi massal dirancang lewat preview + explicit confirm.

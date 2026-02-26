@@ -1,0 +1,34 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: lintasmemori-api
+    ports:
+      - "8000:8000"
+    environment:
+      LM_DB_PATH: /data/lintasmemori.db
+      LM_STATIC_DIR: /app/apps/web/dist
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: lintasmemori-worker
+    command: ["python", "/app/workers/python/worker.py"]
+    environment:
+      LM_DB_PATH: /data/lintasmemori.db
+      LM_STATIC_DIR: /app/apps/web/dist
+    volumes:
+      - ./data:/data
+    depends_on:
+      api:
+        condition: service_healthy

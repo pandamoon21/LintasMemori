@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from .models import Account, Job
-from .schemas import AccountOut, JobOut
+from .models import Account, Job, JobEvent
+from .schemas import AccountOut, JobEventOut, JobOut
 
 
 def account_to_out(account: Account) -> AccountOut:
@@ -17,7 +17,18 @@ def account_to_out(account: Account) -> AccountOut:
     )
 
 
-def job_to_out(job: Job) -> JobOut:
+def job_event_to_out(event: JobEvent) -> JobEventOut:
+    return JobEventOut(
+        id=event.id,
+        job_id=event.job_id,
+        level=event.level,
+        message=event.message,
+        progress=event.progress,
+        created_at=event.created_at,
+    )
+
+
+def job_to_out(job: Job, include_events: bool = False) -> JobOut:
     return JobOut(
         id=job.id,
         account_id=job.account_id,
@@ -35,4 +46,5 @@ def job_to_out(job: Job) -> JobOut:
         updated_at=job.updated_at,
         started_at=job.started_at,
         finished_at=job.finished_at,
+        events=[job_event_to_out(item) for item in job.events] if include_events else [],
     )
