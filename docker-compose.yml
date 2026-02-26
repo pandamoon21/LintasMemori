@@ -5,7 +5,7 @@ services:
       dockerfile: docker/Dockerfile
     container_name: lintasmemori-api
     ports:
-      - "8000:8000"
+      - "1453:8000"
     environment:
       LM_DB_PATH: /data/lintasmemori.db
       LM_STATIC_DIR: /app/apps/web/dist

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -45,16 +46,16 @@ def _python_version(python_exec: str) -> tuple[int, int]:
     return int(major), int(minor)
 
 
-def _resolve_python311() -> str:
+def _resolve_python_runtime() -> str:
     env_python = os.getenv("LM_PYTHON")
     if env_python:
         major, minor = _python_version(env_python)
-        if (major, minor) >= (3, 11):
+        if (major, minor) >= (3, 9):
             return env_python
-        raise RuntimeError(f"LM_PYTHON points to Python {major}.{minor}. Require Python 3.11+")
+        raise RuntimeError(f"LM_PYTHON points to Python {major}.{minor}. Require Python 3.9+")
 
     candidates: list[str] = []
-    if sys.version_info >= (3, 11):
+    if sys.version_info >= (3, 9):
         candidates.append(sys.executable)
 
     if os.name == "nt":
@@ -79,21 +80,21 @@ def _resolve_python311() -> str:
             major, minor = _python_version(candidate)
         except Exception:
             continue
-        if (major, minor) >= (3, 11):
+        if (major, minor) >= (3, 9):
             return candidate
 
     raise RuntimeError(
-        "Python 3.11+ not found. Install Python 3.11 and retry, "
-        "or set LM_PYTHON to a Python 3.11 executable."
+        "Python 3.9+ not found. Install Python 3.9 or newer and retry, "
+        "or set LM_PYTHON to a valid Python executable."
     )
 
 
 def _ensure_venv(base_python: str) -> None:
     if VENV_PY.exists():
         major, minor = _python_version(str(VENV_PY))
-        if (major, minor) >= (3, 11):
+        if (major, minor) >= (3, 9):
             return
-        print(f"[start_all] Existing venv uses Python {major}.{minor}; recreating for Python 3.11+")
+        print(f"[start_all] Existing venv uses Python {major}.{minor}; recreating for Python 3.9+")
         shutil.rmtree(VENV_DIR, ignore_errors=True)
 
     print(f"[start_all] Creating virtualenv in services/api/.venv using {base_python}")
@@ -112,7 +113,14 @@ def _ensure_web_dist(skip_install: bool, skip_web_build: bool, rebuild_web: bool
         return
     dist_dir = WEB_DIR / "dist"
     if dist_dir.exists() and any(dist_dir.iterdir()) and not rebuild_web:
-        return
+        index_html = dist_dir / "index.html"
+        if index_html.exists():
+            content = index_html.read_text(encoding="utf-8", errors="ignore")
+            if "/app/assets/" in content:
+                return
+            print("[start_all] Existing dist uses old base path. Rebuilding web bundle...")
+        else:
+            return
 
     npm = shutil.which("npm")
     if not npm:
@@ -169,6 +177,12 @@ def _stop_existing() -> None:
     subprocess.run([sys.executable, str(ROOT / "stop_all.py")], check=False)
 
 
+def _is_port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.6)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start LintasMemori stack (api + worker)")
     parser.add_argument("--prepare-only", action="store_true", help="Only install/build dependencies")
@@ -180,11 +194,20 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    api_port = int(os.getenv("LM_API_PORT", "1453"))
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     _stop_existing()
+    if _is_port_in_use(api_port):
+        raise RuntimeError(
+            f"Port {api_port} is already in use by another process. "
+            "Stop that process first, then rerun start_all.py."
+        )
 
-    base_python = _resolve_python311()
+    base_python = _resolve_python_runtime()
+    major, minor = _python_version(base_python)
+    if (major, minor) < (3, 11):
+        print(f"[start_all] INFO: running with Python {major}.{minor}. Recommended: Python 3.11+")
     _ensure_venv(base_python=base_python)
     _ensure_api_deps(skip_install=args.skip_install)
     _ensure_web_dist(skip_install=args.skip_install, skip_web_build=args.skip_web_build, rebuild_web=args.rebuild_web)
@@ -203,7 +226,7 @@ def main() -> int:
     processes.append(
         _start_process(
             "api",
-            [str(VENV_PY), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
+            [str(VENV_PY), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(api_port)],
             cwd=API_DIR,
             env=env,
         )
@@ -224,15 +247,15 @@ def main() -> int:
     }
     STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
-    healthy = _wait_health("http://127.0.0.1:8000/health", timeout_seconds=45)
+    healthy = _wait_health(f"http://127.0.0.1:{api_port}/health", timeout_seconds=45)
     if healthy:
-        print("[start_all] API healthy: http://127.0.0.1:8000/health")
+        print(f"[start_all] API healthy: http://127.0.0.1:{api_port}/health")
     else:
         print("[start_all] WARNING: API health check timed out")
 
     print("[start_all] Started services:")
-    print("  API: http://127.0.0.1:8000")
-    print("  UI:  http://127.0.0.1:8000/app")
+    print(f"  API: http://127.0.0.1:{api_port}")
+    print(f"  UI:  http://127.0.0.1:{api_port}/app")
     print(f"  state: {STATE_FILE}")
     return 0
 

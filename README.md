@@ -32,9 +32,9 @@ Dashboard organizer Google Photos dengan backend native Python.
 
 Prasyarat:
 
-- Python 3.11+
+- Python 3.9+ (disarankan 3.11+)
 - npm (hanya untuk build frontend static)
-- Jika punya banyak Python, set `LM_PYTHON` ke executable Python 3.11.
+- Jika punya banyak Python, set `LM_PYTHON` ke executable Python yang ingin dipakai.
 
 Start stack (1 klik):
 
@@ -55,13 +55,14 @@ Windows double-click:
 
 Output:
 
-- API: `http://127.0.0.1:8000`
-- UI: `http://127.0.0.1:8000/app`
+- API: `http://127.0.0.1:1453`
+- UI: `http://127.0.0.1:1453/app`
 
 Catatan:
 
 - Launcher menyimpan PID di `.runtime/processes_py.json`.
 - Log proses ada di `.runtime/logs/`.
+- Port default launcher adalah `1453` (override dengan env `LM_API_PORT`).
 
 ## Menjalankan (Docker Compose)
 
@@ -73,7 +74,7 @@ docker compose down
 
 URL:
 
-- API + UI static: `http://127.0.0.1:8000` (UI di `/app`)
+- API + UI static: `http://127.0.0.1:1453` (UI di `/app`)
 
 ## Alur penggunaan singkat
 

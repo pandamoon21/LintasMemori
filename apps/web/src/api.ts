@@ -1,4 +1,9 @@
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const runtimeOrigin =
+  typeof window !== "undefined" && window.location.origin && !window.location.origin.includes(":5173")
+    ? window.location.origin
+    : "";
+
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || runtimeOrigin || "http://localhost:1453";
 
 async function parseResponse<T>(res: Response): Promise<T> {
   const body = await res.json().catch(() => ({}));
