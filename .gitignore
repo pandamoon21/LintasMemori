@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Node
+node_modules/
+dist/
+
+# Build
+*.db
+*.sqlite
+*.sqlite3
+*.tsbuildinfo
+
+# Runtime
+.runtime/
